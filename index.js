@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
-import { App } from '@slack/bolt';
+import pkg from '@slack/bolt';
+const { App } = pkg;
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
