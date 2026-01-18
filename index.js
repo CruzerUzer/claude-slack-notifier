@@ -15,6 +15,7 @@ const SLACK_CHANNEL = process.env.SLACK_CHANNEL || '#claude-notifications';
 // Pending notification timer
 let pendingNotification = null;
 let currentNotificationData = null;
+let lastSentQuestionHash = null;
 
 // Initialize Slack app with Socket Mode
 const slackApp = new App({
@@ -222,8 +223,33 @@ async function sendToTerminal(text) {
   }
 }
 
+// Create hash of notification to detect duplicates
+function getNotificationHash(notification) {
+  // Hash based on message and options
+  const hashData = JSON.stringify({
+    message: notification.message,
+    options: notification.options,
+    question_data: notification.question_data
+  });
+  // Simple hash function
+  let hash = 0;
+  for (let i = 0; i < hashData.length; i++) {
+    const char = hashData.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return hash.toString();
+}
+
 // Send notification to Slack
 async function sendSlackNotification(notification) {
+  // Check if this is a duplicate notification
+  const notificationHash = getNotificationHash(notification);
+  if (notificationHash === lastSentQuestionHash) {
+    console.log('Duplicate notification detected, skipping');
+    return null;
+  }
+
   try {
     const result = await slackApp.client.chat.postMessage({
       channel: SLACK_CHANNEL,
@@ -232,6 +258,7 @@ async function sendSlackNotification(notification) {
     });
 
     console.log(`Notification sent to Slack: ${result.ts}`);
+    lastSentQuestionHash = notificationHash;
     return result;
   } catch (error) {
     console.error('Failed to send Slack notification:', error);
@@ -298,6 +325,9 @@ slackApp.action(/option_\d+/, async ({ action, ack, say, body }) => {
   const success = await sendToTerminal(optionNumber);
 
   if (success) {
+    // Clear the last question hash since user answered
+    lastSentQuestionHash = null;
+
     await say({
       text: `✅ Skickade till Claude: ${optionNumber} (${selectedValue})`,
       thread_ts: body.message.ts,
@@ -324,6 +354,9 @@ slackApp.message(async ({ message, say }) => {
   const success = await sendToTerminal(message.text);
 
   if (success) {
+    // Clear the last question hash since user answered
+    lastSentQuestionHash = null;
+
     await say({
       text: `✅ Skickade till Claude: "${message.text}"`,
       thread_ts: message.ts,
