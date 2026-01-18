@@ -47,7 +47,7 @@ function formatSlackMessage(notification) {
       type: 'header',
       text: {
         type: 'plain_text',
-        text: 'Claude is waiting for input',
+        text: '🤖 Claude väntar på input',
         emoji: true,
       },
     },
@@ -84,13 +84,79 @@ function formatSlackMessage(notification) {
     });
   }
 
+  // Show options if available
+  if (notification.options && Array.isArray(notification.options)) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Alternativ:*',
+      },
+    });
+
+    // Add each option as a numbered item
+    const optionsList = notification.options
+      .map((opt, i) => {
+        const label = typeof opt === 'string' ? opt : (opt.label || opt.name || JSON.stringify(opt));
+        const desc = opt.description ? ` - ${opt.description}` : '';
+        return `${i + 1}. ${label}${desc}`;
+      })
+      .join('\n');
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: optionsList,
+      },
+    });
+
+    // Add buttons for quick selection (max 5 buttons per action block)
+    const buttons = notification.options.slice(0, 5).map((opt, i) => {
+      const label = typeof opt === 'string' ? opt : (opt.label || opt.name || `Option ${i + 1}`);
+      return {
+        type: 'button',
+        text: {
+          type: 'plain_text',
+          text: label.substring(0, 75), // Slack limit
+          emoji: true,
+        },
+        value: label,
+        action_id: `option_${i}`,
+      };
+    });
+
+    blocks.push({
+      type: 'actions',
+      elements: buttons,
+    });
+  }
+
+  // Show raw data for debugging (truncated)
+  const rawData = JSON.stringify(notification, null, 2);
+  if (rawData.length > 100) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `\`\`\`${rawData.substring(0, 500)}${rawData.length > 500 ? '...' : ''}\`\`\``,
+        },
+      ],
+    });
+  }
+
   // Add instructions
+  blocks.push({
+    type: 'divider',
+  });
+
   blocks.push({
     type: 'context',
     elements: [
       {
         type: 'mrkdwn',
-        text: 'Reply in this thread to send input to Claude',
+        text: '💬 Klicka på en knapp eller skriv ett svar i tråden',
       },
     ],
   });
@@ -105,7 +171,18 @@ async function getTmuxSession() {
   }
 
   try {
-    const { stdout } = await execAsync('tmux display-message -p "#S"');
+    // Try to get the attached session first
+    const { stdout } = await execAsync('tmux list-sessions -F "#{session_name}:#{session_attached}" | grep ":1$" | cut -d: -f1 | head -1');
+    if (stdout.trim()) {
+      return stdout.trim();
+    }
+  } catch {
+    // Ignore error
+  }
+
+  try {
+    // Fallback: get any session
+    const { stdout } = await execAsync('tmux list-sessions -F "#{session_name}" | head -1');
     return stdout.trim();
   } catch {
     // Try byobu
@@ -121,6 +198,8 @@ async function getTmuxSession() {
 // Send keys to tmux/byobu
 async function sendToTerminal(text) {
   const session = await getTmuxSession();
+  console.log(`Attempting to send to terminal. Session: ${session}, Text: ${text}`);
+
   if (!session) {
     console.error('No tmux/byobu session found');
     return false;
@@ -129,7 +208,13 @@ async function sendToTerminal(text) {
   try {
     // Escape special characters for tmux
     const escapedText = text.replace(/'/g, "'\\''");
-    await execAsync(`tmux send-keys -t "${session}" '${escapedText}' Enter`);
+
+    // Send each character individually followed by Enter
+    // This helps with readline-based inputs
+    const command = `tmux send-keys -t "${session}" -l '${escapedText}' && tmux send-keys -t "${session}" Enter`;
+    console.log(`Executing: ${command}`);
+    await execAsync(command);
+    console.log(`Successfully sent to session ${session}`);
     return true;
   } catch (error) {
     console.error('Failed to send to terminal:', error);
@@ -198,6 +283,33 @@ server.get('/health', (req, res) => {
   });
 });
 
+// Handle button clicks from Slack
+slackApp.action(/option_\d+/, async ({ action, ack, say, body }) => {
+  await ack();
+
+  const selectedValue = action.value;
+  const optionIndex = action.action_id.replace('option_', '');
+  // Claude expects the option number (1-indexed)
+  const optionNumber = (parseInt(optionIndex) + 1).toString();
+
+  console.log(`Button clicked: ${selectedValue} (option ${optionNumber})`);
+
+  // Send the option number to the terminal
+  const success = await sendToTerminal(optionNumber);
+
+  if (success) {
+    await say({
+      text: `✅ Skickade till Claude: ${optionNumber} (${selectedValue})`,
+      thread_ts: body.message.ts,
+    });
+  } else {
+    await say({
+      text: '❌ Kunde inte skicka till terminalen. Kör tmux/byobu?',
+      thread_ts: body.message.ts,
+    });
+  }
+});
+
 // Handle messages from Slack (replies in thread)
 slackApp.message(async ({ message, say }) => {
   // Only process messages in the notification channel
@@ -213,12 +325,12 @@ slackApp.message(async ({ message, say }) => {
 
   if (success) {
     await say({
-      text: `Sent to Claude: "${message.text}"`,
+      text: `✅ Skickade till Claude: "${message.text}"`,
       thread_ts: message.ts,
     });
   } else {
     await say({
-      text: 'Failed to send to terminal. Is tmux/byobu running?',
+      text: '❌ Kunde inte skicka till terminalen. Kör tmux/byobu?',
       thread_ts: message.ts,
     });
   }
